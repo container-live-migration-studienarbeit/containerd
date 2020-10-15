@@ -147,6 +147,13 @@ file {
       type: TYPE_STRING
       json_name: "workPath"
     }
+    field {
+      name: "pre_dump"
+      number: 10
+      label: LABEL_OPTIONAL
+      type: TYPE_BOOL
+      json_name: "preDump"
+    }
   }
   message_type {
     name: "ProcessDetails"
@@ -164,3 +171,4 @@ file {
   weak_dependency: 0
   syntax: "proto3"
 }
+

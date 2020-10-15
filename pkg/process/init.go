@@ -424,6 +424,9 @@ func (p *Init) checkpoint(ctx context.Context, r *CheckpointConfig) error {
 	if !r.Exit {
 		actions = append(actions, runc.LeaveRunning)
 	}
+	if r.PreDump {
+		actions = append(actions, runc.PreDump)
+	}
 	// keep criu work directory if criu work dir is set
 	work := r.WorkDir
 	if work == "" {
