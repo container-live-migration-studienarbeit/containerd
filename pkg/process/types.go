@@ -62,5 +62,6 @@ type CheckpointConfig struct {
 	AllowExternalUnixSockets bool
 	AllowTerminal            bool
 	FileLocks                bool
+	PreDump					 bool
 	EmptyNamespaces          []string
 }

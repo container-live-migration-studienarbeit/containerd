@@ -39,6 +39,7 @@ message CheckpointOptions {
 	string cgroups_mode = 7;
 	string work_path = 8;
 	string image_path = 9;
+	bool pre_dump = 10;
 }
 
 message ProcessDetails {
