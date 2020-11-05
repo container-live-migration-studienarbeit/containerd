@@ -470,7 +470,7 @@ func (t *task) Checkpoint(ctx context.Context, opts ...CheckpointTaskOpts) (Imag
 	if isCheckpointPathExist(cr.Runtime.Name, i.Options) {
 		return NewImage(t.client, images.Image{}), nil
 	}
-
+	cr.Image = ""
 	if cr.Image != "" {
 		if err := t.checkpointImage(ctx, &index, cr.Image); err != nil {
 			return nil, err
