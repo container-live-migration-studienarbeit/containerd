@@ -29,6 +29,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/checkpoint-restore/go-criu/stats"
 	"github.com/containerd/console"
 	"github.com/containerd/containerd/log"
 	"github.com/containerd/containerd/mount"
@@ -36,6 +37,7 @@ import (
 	"github.com/containerd/fifo"
 	runc "github.com/containerd/go-runc"
 	google_protobuf "github.com/gogo/protobuf/types"
+	"github.com/golang/protobuf/proto"
 	specs "github.com/opencontainers/runtime-spec/specs-go"
 	"github.com/pkg/errors"
 	"golang.org/x/sys/unix"
@@ -411,6 +413,29 @@ func (p *Init) exec(ctx context.Context, path string, r *ExecConfig) (Process, e
 	return e, nil
 }
 
+func criuGetDumpStats(imgDir *os.File) (*stats.DumpStatsEntry, error) {
+	stf, err := os.Open(imgDir.Name() + "/stats-dump")
+	if err != nil {
+		return nil, err
+	}
+	defer stf.Close()
+
+	buf := make([]byte, 2*4096)
+	sz, err := stf.Read(buf)
+	if err != nil {
+		return nil, err
+	}
+
+	st := &stats.StatsEntry{}
+	// Skip 2 magic values and entry size
+	err = proto.Unmarshal(buf[12:sz], st)
+	if err != nil {
+		return nil, err
+	}
+
+	return st.GetDump(), nil
+}
+
 // Checkpoint the init process
 func (p *Init) Checkpoint(ctx context.Context, r *CheckpointConfig) error {
 	p.mu.Lock()
@@ -421,11 +446,10 @@ func (p *Init) Checkpoint(ctx context.Context, r *CheckpointConfig) error {
 
 func (p *Init) checkpoint(ctx context.Context, r *CheckpointConfig) error {
 	var actions []runc.CheckpointAction
+
+	actionsWithPredump := append(actions, runc.PreDump)
 	if !r.Exit {
 		actions = append(actions, runc.LeaveRunning)
-	}
-	if r.PreDump {
-		actions = append(actions, runc.PreDump)
 	}
 	// keep criu work directory if criu work dir is set
 	work := r.WorkDir
@@ -433,20 +457,61 @@ func (p *Init) checkpoint(ctx context.Context, r *CheckpointConfig) error {
 		work = filepath.Join(p.WorkDir, "criu-work")
 		defer os.RemoveAll(work)
 	}
-	if err := p.runtime.Checkpoint(ctx, p.id, &runc.CheckpointOpts{
-		WorkDir:                  work,
-		ImagePath:                r.Path,
-		AllowOpenTCP:             r.AllowOpenTCP,
-		AllowExternalUnixSockets: r.AllowExternalUnixSockets,
-		AllowTerminal:            r.AllowTerminal,
-		FileLocks:                r.FileLocks,
-		EmptyNamespaces:          r.EmptyNamespaces,
-	}, actions...); err != nil {
-		dumpLog := filepath.Join(p.Bundle, "criu-dump.log")
-		if cerr := copyFile(dumpLog, filepath.Join(work, "dump.log")); cerr != nil {
-			log.G(ctx).Error(err)
+	if !r.PreDump {
+		if err := p.runtime.Checkpoint(ctx, p.id, &runc.CheckpointOpts{
+			WorkDir:                  work,
+			ImagePath:                r.Path,
+			AllowOpenTCP:             r.AllowOpenTCP,
+			AllowExternalUnixSockets: r.AllowExternalUnixSockets,
+			AllowTerminal:            r.AllowTerminal,
+			FileLocks:                r.FileLocks,
+			EmptyNamespaces:          r.EmptyNamespaces,
+		}, actions...); err != nil {
+			dumpLog := filepath.Join(p.Bundle, "criu-dump.log")
+			if cerr := copyFile(dumpLog, filepath.Join(work, "dump.log")); cerr != nil {
+				log.G(ctx).Error(err)
+			}
+			return fmt.Errorf("%s path= %s", criuError(err), dumpLog)
 		}
-		return fmt.Errorf("%s path= %s", criuError(err), dumpLog)
+	} else {
+		runcOptions := &runc.CheckpointOpts{
+			WorkDir:                  work,
+			AllowOpenTCP:             r.AllowOpenTCP,
+			AllowExternalUnixSockets: r.AllowExternalUnixSockets,
+			AllowTerminal:            r.AllowTerminal,
+			FileLocks:                r.FileLocks,
+			EmptyNamespaces:          r.EmptyNamespaces,
+		}
+		const MAX_PRE_DUMPS = 10
+		i := 0
+		var dumpStats *stats.DumpStatsEntry = nil
+		// TODO: skip in case of increasing pages to write
+		for ;  (dumpStats == nil || dumpStats.GetPagesWritten() > uint64(64)) && i < MAX_PRE_DUMPS; i++{
+			runcOptions.ImagePath = filepath.Join(r.Path, string(i+48))
+
+			if err := p.runtime.Checkpoint(ctx, p.id, runcOptions, actionsWithPredump...); err != nil {
+				dumpLog := filepath.Join(p.Bundle, "criu-dump.log")
+				if cerr := copyFile(dumpLog, filepath.Join(work, "dump.log")); cerr != nil {
+					log.G(ctx).Error(err)
+				}
+				return fmt.Errorf("%s path= %s", criuError(err), dumpLog)
+			}
+
+			runcOptions.ParentPath = "../" + string(i+48)
+			
+			workDir, _ := os.Open(work)
+			dumpStats, _ = criuGetDumpStats(workDir)
+		}
+		runcOptions.ImagePath = r.Path
+		runcOptions.ParentPath = string(i+48)
+		//final dump
+		if err := p.runtime.Checkpoint(ctx, p.id, runcOptions, actions...); err != nil {
+			dumpLog := filepath.Join(p.Bundle, "criu-dump.log")
+			if cerr := copyFile(dumpLog, filepath.Join(work, "dump.log")); cerr != nil {
+				log.G(ctx).Error(err)
+			}
+			return fmt.Errorf("%s path= %s", criuError(err), dumpLog)
+		}
 	}
 	return nil
 }
