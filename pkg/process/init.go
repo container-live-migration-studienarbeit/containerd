@@ -413,7 +413,7 @@ func (p *Init) exec(ctx context.Context, path string, r *ExecConfig) (Process, e
 	return e, nil
 }
 
-func criuGetDumpStats(imgDir *os.File) (*stats.DumpStatsEntry, error) {
+func criuGetDumpStats(imgDir *os.File, statsCopyFile *os.File) (*stats.DumpStatsEntry, error) {
 	stf, err := os.Open(imgDir.Name() + "/stats-dump")
 	if err != nil {
 		return nil, err
@@ -429,6 +429,11 @@ func criuGetDumpStats(imgDir *os.File) (*stats.DumpStatsEntry, error) {
 	st := &stats.StatsEntry{}
 	// Skip 2 magic values and entry size
 	err = proto.Unmarshal(buf[12:sz], st)
+	if err != nil {
+		return nil, err
+	}
+
+	_, err = statsCopyFile.Write(buf[:sz])
 	if err != nil {
 		return nil, err
 	}
@@ -500,7 +505,13 @@ func (p *Init) checkpoint(ctx context.Context, r *CheckpointConfig) error {
 			runcOptions.ParentPath = "../" + string(i+48)
 			
 			workDir, _ := os.Open(work)
-			dumpStats, _ = criuGetDumpStats(workDir)
+			defer workDir.Close()
+			statsCopyFile, err := os.Create(filepath.Join(work, "stats-dump" + string(i+48)))
+			defer statsCopyFile.Close()
+			dumpStats, err = criuGetDumpStats(workDir, statsCopyFile)
+			if err != nil {
+				return fmt.Errorf("ERROR %s", err.Error())
+			}
 		}
 		runcOptions.ImagePath = r.Path
 		runcOptions.ParentPath = string(i+48)
