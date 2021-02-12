@@ -29,6 +29,9 @@ message Options {
 	string criu_image_path = 10;
 	// criu work path
 	string criu_work_path = 11;
+	bool pre_dump = 12;
+	bool lazy_migration = 13;
+	string criu_page_server = 14;
 }
 
 message CheckpointOptions {
@@ -51,6 +54,8 @@ message CheckpointOptions {
 	// checkpoint work path
 	string work_path = 9;
 	bool pre_dump = 10;
+	bool lazy_migration = 11;
+	string criu_page_server = 12;
 }
 
 message ProcessDetails {

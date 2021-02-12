@@ -34,8 +34,10 @@ import (
 	"github.com/containerd/containerd/log"
 	"github.com/containerd/containerd/mount"
 	"github.com/containerd/containerd/pkg/stdio"
+	"github.com/containerd/containerd/runtime/v2/runc/options"
 	"github.com/containerd/fifo"
 	runc "github.com/containerd/go-runc"
+	"github.com/containerd/typeurl"
 	google_protobuf "github.com/gogo/protobuf/types"
 	"github.com/golang/protobuf/proto"
 	specs "github.com/opencontainers/runtime-spec/specs-go"
@@ -187,12 +189,42 @@ func (p *Init) openStdin(path string) error {
 	return nil
 }
 
+func checkRuntime(current, expected string) bool {
+	cp := strings.Split(current, ".")
+	l := len(cp)
+	for i, p := range strings.Split(expected, ".") {
+		if i > l {
+			return false
+		}
+		if p != cp[i] {
+			return false
+		}
+	}
+	return true
+}
+
 func (p *Init) createCheckpointedState(r *CreateConfig, pidFile *pidFile) error {
+	var lazyMigration bool
+	var pageServer string
+	if r.Runtime == "runc" {
+		v, err := typeurl.UnmarshalAny(r.Options)
+		if err != nil {
+			return err
+		}
+		opts, ok := v.(*options.Options)
+		if !ok {
+			return fmt.Errorf("invalid task create option for %s", r.Runtime)
+		}
+		pageServer = opts.CriuPageServer
+		lazyMigration = opts.LazyMigration
+	}
 	opts := &runc.RestoreOpts{
 		CheckpointOpts: runc.CheckpointOpts{
-			ImagePath:  r.Checkpoint,
-			WorkDir:    p.CriuWorkPath,
-			ParentPath: r.ParentCheckpoint,
+			ImagePath:      r.Checkpoint,
+			WorkDir:        p.CriuWorkPath,
+			ParentPath:     r.ParentCheckpoint,
+			LazyPages:      lazyMigration,
+			CriuPageServer: pageServer,
 		},
 		PidFile:     pidFile.Path(),
 		IO:          p.io.IO(),
@@ -457,8 +489,18 @@ func (p *Init) checkpoint(ctx context.Context, r *CheckpointConfig) error {
 		work = filepath.Join(p.WorkDir, "criu-work")
 		defer os.RemoveAll(work)
 	}
+	var statusFileWrite *os.File
+	var statusFileRead *os.File
+	if r.LazyMigration {
+		var err error
+		statusFileRead, statusFileWrite, err = os.Pipe()
+		if err != nil {
+			return err
+		}
+	}
+
 	if !r.PreDump {
-		if err := p.runtime.Checkpoint(ctx, p.id, &runc.CheckpointOpts{
+		opts := runc.CheckpointOpts{
 			WorkDir:                  work,
 			ImagePath:                r.Path,
 			AllowOpenTCP:             r.AllowOpenTCP,
@@ -466,12 +508,29 @@ func (p *Init) checkpoint(ctx context.Context, r *CheckpointConfig) error {
 			AllowTerminal:            r.AllowTerminal,
 			FileLocks:                r.FileLocks,
 			EmptyNamespaces:          r.EmptyNamespaces,
-		}, actions...); err != nil {
-			dumpLog := filepath.Join(p.Bundle, "criu-dump.log")
-			if cerr := copyFile(dumpLog, filepath.Join(work, "dump.log")); cerr != nil {
-				log.G(ctx).Error(err)
+			CriuPageServer:           r.CriuPageServer,
+			LazyPages:                r.LazyMigration,
+			StatusFile:               statusFileWrite,
+		}
+		if statusFileWrite != nil {
+			// Run checkpoint asynch so we can return once the statusFile gets updated
+			go func() {
+				if err := p.runtime.Checkpoint(ctx, p.id, &opts, actions...); err != nil {
+					dumpLog := filepath.Join(p.Bundle, "criu-dump.log")
+					if cerr := copyFile(dumpLog, filepath.Join(work, "dump.log")); cerr != nil {
+						log.G(ctx).Error(err)
+					}
+				}
+				_, _ = statusFileWrite.Write([]byte{0})
+			}()
+		} else {
+			if err := p.runtime.Checkpoint(ctx, p.id, &opts, actions...); err != nil {
+				dumpLog := filepath.Join(p.Bundle, "criu-dump.log")
+				if cerr := copyFile(dumpLog, filepath.Join(work, "dump.log")); cerr != nil {
+					log.G(ctx).Error(err)
+				}
+				return fmt.Errorf("%s path= %s", criuError(err), dumpLog)
 			}
-			return fmt.Errorf("%s path= %s", criuError(err), dumpLog)
 		}
 	} else {
 		runcOptions := &runc.CheckpointOpts{
@@ -486,7 +545,7 @@ func (p *Init) checkpoint(ctx context.Context, r *CheckpointConfig) error {
 		i := 0
 		var dumpStats *stats.DumpStatsEntry = nil
 		// TODO: skip in case of increasing pages to write
-		for ;  (dumpStats == nil || dumpStats.GetPagesWritten() > uint64(64)) && i < MAX_PRE_DUMPS; i++{
+		for ; (dumpStats == nil || dumpStats.GetPagesWritten() > uint64(64)) && i < MAX_PRE_DUMPS; i++ {
 			runcOptions.ImagePath = filepath.Join(r.Path, string(i+48))
 
 			if err := p.runtime.Checkpoint(ctx, p.id, runcOptions, actionsWithPredump...); err != nil {
@@ -498,20 +557,45 @@ func (p *Init) checkpoint(ctx context.Context, r *CheckpointConfig) error {
 			}
 
 			runcOptions.ParentPath = "../" + string(i+48)
-			
+
 			workDir, _ := os.Open(work)
 			dumpStats, _ = criuGetDumpStats(workDir)
 		}
 		runcOptions.ImagePath = r.Path
-		runcOptions.ParentPath = string(i+48)
+		runcOptions.ParentPath = string(i + 48)
+		runcOptions.CriuPageServer = r.CriuPageServer
+		runcOptions.LazyPages = r.LazyMigration
+		runcOptions.StatusFile = statusFileWrite
 		//final dump
-		if err := p.runtime.Checkpoint(ctx, p.id, runcOptions, actions...); err != nil {
-			dumpLog := filepath.Join(p.Bundle, "criu-dump.log")
-			if cerr := copyFile(dumpLog, filepath.Join(work, "dump.log")); cerr != nil {
-				log.G(ctx).Error(err)
+		if statusFileWrite != nil {
+			// Run checkpoint asynch so we can return once the statusFile gets updated
+			go func() {
+				if err := p.runtime.Checkpoint(ctx, p.id, runcOptions, actions...); err != nil {
+					dumpLog := filepath.Join(p.Bundle, "criu-dump.log")
+					if cerr := copyFile(dumpLog, filepath.Join(work, "dump.log")); cerr != nil {
+						log.G(ctx).Error(err)
+					}
+				}
+				_, _ = statusFileWrite.Write([]byte{0})
+			}()
+		} else {
+			if err := p.runtime.Checkpoint(ctx, p.id, runcOptions, actions...); err != nil {
+				dumpLog := filepath.Join(p.Bundle, "criu-dump.log")
+				if cerr := copyFile(dumpLog, filepath.Join(work, "dump.log")); cerr != nil {
+					log.G(ctx).Error(err)
+				}
+				return fmt.Errorf("%s path= %s", criuError(err), dumpLog)
 			}
-			return fmt.Errorf("%s path= %s", criuError(err), dumpLog)
 		}
+	}
+	if statusFileRead != nil {
+		// wait for an update in the status file in case of lazy migration
+		b := make([]byte, 1)
+		readBytes, err := statusFileRead.Read(b)
+		if readBytes == 1 {
+			return nil
+		}
+		return err
 	}
 	return nil
 }

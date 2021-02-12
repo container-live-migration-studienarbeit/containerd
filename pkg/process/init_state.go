@@ -20,6 +20,8 @@ package process
 
 import (
 	"context"
+	"os/exec"
+	"strings"
 
 	runc "github.com/containerd/go-runc"
 	google_protobuf "github.com/gogo/protobuf/types"
@@ -158,7 +160,16 @@ func (s *createdCheckpointState) Start(ctx context.Context) error {
 		defer socket.Close()
 		s.opts.ConsoleSocket = socket
 	}
-
+	if s.opts.LazyPages {
+		addressParts := strings.Split(s.opts.CriuPageServer, ":")
+		if len(addressParts) != 2 {
+			return errors.New("address has to be formatted like ADDRESS:PORT")
+		}
+		criuPageServer := exec.Command("criu", "lazy-pages", "--page-server", "--address", addressParts[0], "--port", addressParts[1], "-D", s.opts.ImagePath, "-W", s.opts.WorkDir)
+		criuPageServer.Start()
+		// Clear page server so no --page-server argument is generated for `runc restore`
+		s.opts.CriuPageServer = ""
+	}
 	if _, err := s.p.runtime.Restore(ctx, p.id, p.Bundle, s.opts); err != nil {
 		return p.runtimeError(err, "OCI runtime restore failed")
 	}

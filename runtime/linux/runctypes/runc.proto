@@ -27,6 +27,8 @@ message CreateOptions {
 	uint32 io_gid = 11;
 	string criu_work_path = 12;
 	string criu_image_path = 13;
+	bool lazy_migration = 14;
+	string page_server = 15;
 }
 
 message CheckpointOptions {
@@ -40,6 +42,8 @@ message CheckpointOptions {
 	string work_path = 8;
 	string image_path = 9;
 	bool pre_dump = 10;
+	bool lazy_migration = 11;
+	string criu_page_server = 12;
 }
 
 message ProcessDetails {
