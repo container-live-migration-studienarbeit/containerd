@@ -520,6 +520,10 @@ func (p *Init) checkpoint(ctx context.Context, r *CheckpointConfig) error {
 					if cerr := copyFile(dumpLog, filepath.Join(work, "dump.log")); cerr != nil {
 						log.G(ctx).Error(err)
 					}
+					statsDump := filepath.Join(p.Bundle, "stats-dump")
+					if cerr := copyFile(statsDump, filepath.Join(work, "stats-dump")); cerr != nil {
+						log.G(ctx).Error(err)
+					}
 				}
 				_, _ = statusFileWrite.Write([]byte{0})
 			}()
@@ -527,6 +531,10 @@ func (p *Init) checkpoint(ctx context.Context, r *CheckpointConfig) error {
 			if err := p.runtime.Checkpoint(ctx, p.id, &opts, actions...); err != nil {
 				dumpLog := filepath.Join(p.Bundle, "criu-dump.log")
 				if cerr := copyFile(dumpLog, filepath.Join(work, "dump.log")); cerr != nil {
+					log.G(ctx).Error(err)
+				}
+				statsDump := filepath.Join(p.Bundle, "stats-dump")
+				if cerr := copyFile(statsDump, filepath.Join(work, "stats-dump")); cerr != nil {
 					log.G(ctx).Error(err)
 				}
 				return fmt.Errorf("%s path= %s", criuError(err), dumpLog)
@@ -553,6 +561,10 @@ func (p *Init) checkpoint(ctx context.Context, r *CheckpointConfig) error {
 				if cerr := copyFile(dumpLog, filepath.Join(work, "dump.log")); cerr != nil {
 					log.G(ctx).Error(err)
 				}
+				statsDump := filepath.Join(p.Bundle, "stats-dump"+string(i+48))
+				if cerr := copyFile(statsDump, filepath.Join(work, "stats-dump")); cerr != nil {
+					log.G(ctx).Error(err)
+				}
 				return fmt.Errorf("%s path= %s", criuError(err), dumpLog)
 			}
 
@@ -575,6 +587,10 @@ func (p *Init) checkpoint(ctx context.Context, r *CheckpointConfig) error {
 					if cerr := copyFile(dumpLog, filepath.Join(work, "dump.log")); cerr != nil {
 						log.G(ctx).Error(err)
 					}
+					statsDump := filepath.Join(p.Bundle, "stats-dump")
+					if cerr := copyFile(statsDump, filepath.Join(work, "stats-dump")); cerr != nil {
+						log.G(ctx).Error(err)
+					}
 				}
 				_, _ = statusFileWrite.Write([]byte{0})
 			}()
@@ -582,6 +598,10 @@ func (p *Init) checkpoint(ctx context.Context, r *CheckpointConfig) error {
 			if err := p.runtime.Checkpoint(ctx, p.id, runcOptions, actions...); err != nil {
 				dumpLog := filepath.Join(p.Bundle, "criu-dump.log")
 				if cerr := copyFile(dumpLog, filepath.Join(work, "dump.log")); cerr != nil {
+					log.G(ctx).Error(err)
+				}
+				statsDump := filepath.Join(p.Bundle, "stats-dump")
+				if cerr := copyFile(statsDump, filepath.Join(work, "stats-dump")); cerr != nil {
 					log.G(ctx).Error(err)
 				}
 				return fmt.Errorf("%s path= %s", criuError(err), dumpLog)
