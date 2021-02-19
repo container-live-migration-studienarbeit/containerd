@@ -21,6 +21,7 @@ package process
 import (
 	"context"
 	"os/exec"
+	"path/filepath"
 	"strings"
 
 	runc "github.com/containerd/go-runc"
@@ -172,6 +173,10 @@ func (s *createdCheckpointState) Start(ctx context.Context) error {
 	}
 	if _, err := s.p.runtime.Restore(ctx, p.id, p.Bundle, s.opts); err != nil {
 		return p.runtimeError(err, "OCI runtime restore failed")
+	}
+	statsRestore := filepath.Join(s.opts.ImagePath, "stats-restore")
+	if cerr := copyFile(statsRestore, filepath.Join(s.opts.WorkDir, "stats-restore")); cerr != nil {
+		return cerr
 	}
 	if sio.Stdin != "" {
 		if err := p.openStdin(sio.Stdin); err != nil {

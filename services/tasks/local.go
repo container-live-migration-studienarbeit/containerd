@@ -138,6 +138,31 @@ type local struct {
 	v2Runtime *v2.TaskManager
 }
 
+func copy(src, dst string) error {
+	sourceFileStat, err := os.Stat(src)
+	if err != nil {
+		return err
+	}
+
+	if !sourceFileStat.Mode().IsRegular() {
+		return fmt.Errorf("%s is not a regular file", src)
+	}
+
+	source, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer source.Close()
+
+	destination, err := os.Create(dst)
+	if err != nil {
+		return err
+	}
+	defer destination.Close()
+	_, err = io.Copy(destination, source)
+	return err
+}
+
 func (l *local) Create(ctx context.Context, r *api.CreateTaskRequest, _ ...grpc.CallOption) (*api.CreateTaskResponse, error) {
 	container, err := l.getContainer(ctx, r.ContainerID)
 	if err != nil {
@@ -153,6 +178,21 @@ func (l *local) Create(ctx context.Context, r *api.CreateTaskRequest, _ ...grpc.
 		if err != nil {
 			return nil, err
 		}
+		defer func() {
+			v, err := typeurl.UnmarshalAny(r.Options)
+			if err != nil {
+				return
+			}
+			opts, ok := v.(*options.Options)
+			if !ok {
+				return
+			}
+			statsRestore := filepath.Join(opts.CriuImagePath, "stats-restore")
+			if cerr := copy(filepath.Join(checkpointPath, "stats-restore"), statsRestore); cerr != nil {
+				return
+			}
+
+		}()
 		if r.Checkpoint.MediaType != images.MediaTypeContainerd1Checkpoint {
 			return nil, fmt.Errorf("unsupported checkpoint type %q", r.Checkpoint.MediaType)
 		}

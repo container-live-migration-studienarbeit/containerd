@@ -189,20 +189,6 @@ func (p *Init) openStdin(path string) error {
 	return nil
 }
 
-func checkRuntime(current, expected string) bool {
-	cp := strings.Split(current, ".")
-	l := len(cp)
-	for i, p := range strings.Split(expected, ".") {
-		if i > l {
-			return false
-		}
-		if p != cp[i] {
-			return false
-		}
-	}
-	return true
-}
-
 func (p *Init) createCheckpointedState(r *CreateConfig, pidFile *pidFile) error {
 	var lazyMigration bool
 	var pageServer string
