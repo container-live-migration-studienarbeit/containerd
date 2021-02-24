@@ -452,6 +452,8 @@ type CheckpointOpts struct {
 	EmptyNamespaces []string
 	// LazyPages uses userfaultfd to lazily restore memory pages
 	LazyPages bool
+	// RWLayerDir is the path to which the read write layer of the container will be restored
+	RWLayerDir string
 	// StatusFile is the file criu writes \0 to once lazy-pages is ready
 	StatusFile *os.File
 }

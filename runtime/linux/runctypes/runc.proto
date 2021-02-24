@@ -29,6 +29,7 @@ message CreateOptions {
 	string criu_image_path = 13;
 	bool lazy_migration = 14;
 	string page_server = 15;
+	string rw_layer_dir = 16;
 }
 
 message CheckpointOptions {
@@ -44,6 +45,7 @@ message CheckpointOptions {
 	bool pre_dump = 10;
 	bool lazy_migration = 11;
 	string criu_page_server = 12;
+	string rw_layer_dir = 13;
 }
 
 message ProcessDetails {

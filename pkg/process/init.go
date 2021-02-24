@@ -24,9 +24,11 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/checkpoint-restore/go-criu/stats"
@@ -192,6 +194,7 @@ func (p *Init) openStdin(path string) error {
 func (p *Init) createCheckpointedState(r *CreateConfig, pidFile *pidFile) error {
 	var lazyMigration bool
 	var pageServer string
+	var rwLayerDir string
 	if r.Runtime == "runc" {
 		v, err := typeurl.UnmarshalAny(r.Options)
 		if err != nil {
@@ -203,6 +206,7 @@ func (p *Init) createCheckpointedState(r *CreateConfig, pidFile *pidFile) error 
 		}
 		pageServer = opts.CriuPageServer
 		lazyMigration = opts.LazyMigration
+		rwLayerDir = opts.RwLayerDir
 	}
 	opts := &runc.RestoreOpts{
 		CheckpointOpts: runc.CheckpointOpts{
@@ -211,6 +215,7 @@ func (p *Init) createCheckpointedState(r *CreateConfig, pidFile *pidFile) error 
 			ParentPath:     r.ParentCheckpoint,
 			LazyPages:      lazyMigration,
 			CriuPageServer: pageServer,
+			RWLayerDir:     rwLayerDir,
 		},
 		PidFile:     pidFile.Path(),
 		IO:          p.io.IO(),
@@ -462,6 +467,46 @@ func (p *Init) Checkpoint(ctx context.Context, r *CheckpointConfig) error {
 	return p.initState.Checkpoint(ctx, r)
 }
 
+// NOTE: Could also be a member method
+func runCheckpoint(ctx context.Context, r *CheckpointConfig, p *Init, actions *[]runc.CheckpointAction, runcOptions *runc.CheckpointOpts, work string, dumpRWLayerDir bool) error {
+	if err := p.runtime.Checkpoint(ctx, p.id, runcOptions, *actions...); err != nil {
+		// Copy criu logs
+		dumpLog := filepath.Join(p.Bundle, "criu-dump.log")
+		if cerr := copyFile(dumpLog, filepath.Join(work, "dump.log")); cerr != nil {
+			log.G(ctx).Error(cerr)
+		}
+		// Copy criu statistics
+		statsDump := filepath.Join(p.Bundle, "stats-dump")
+		if cerr := copyFile(statsDump, filepath.Join(work, "stats-dump")); cerr != nil {
+			log.G(ctx).Error(cerr)
+			return cerr
+		}
+		// Copy container changes to fs (e.g. `diff/` for overlay2 fs)
+		if dumpRWLayerDir && r.RWLayerDir != "" {
+			archiveDest := filepath.Join(p.Bundle, "rwlayer.tar.gz")
+			cmd := exec.Command("tar", []string{"--strip-components", "1", "-xvf", archiveDest, "-C", r.RWLayerDir}...)
+
+			if cerr := cmd.Start(); cerr != nil {
+				log.G(ctx).Error(errors.Wrap(cerr, "Failed to start `tar` command"))
+			} else {
+				if cerr := cmd.Wait(); cerr != nil {
+					if exiterr, ok := err.(*exec.ExitError); ok {
+						if status, ok := exiterr.Sys().(syscall.WaitStatus); ok {
+							log.G(ctx).Error(errors.Wrap(cerr,
+								fmt.Sprintf("`tar` exited with status %d", status.ExitStatus())))
+						}
+					} else {
+						log.G(ctx).Error(errors.Wrap(cerr, fmt.Sprintf("`tar` cmd.Wait: %v", err)))
+					}
+				}
+			}
+		}
+
+		return fmt.Errorf("%s path= %s", criuError(err), dumpLog)
+	}
+	return nil
+}
+
 func (p *Init) checkpoint(ctx context.Context, r *CheckpointConfig) error {
 	var actions []runc.CheckpointAction
 
@@ -486,7 +531,7 @@ func (p *Init) checkpoint(ctx context.Context, r *CheckpointConfig) error {
 	}
 
 	if !r.PreDump {
-		opts := runc.CheckpointOpts{
+		runcOptions := runc.CheckpointOpts{
 			WorkDir:                  work,
 			ImagePath:                r.Path,
 			AllowOpenTCP:             r.AllowOpenTCP,
@@ -496,38 +541,20 @@ func (p *Init) checkpoint(ctx context.Context, r *CheckpointConfig) error {
 			EmptyNamespaces:          r.EmptyNamespaces,
 			CriuPageServer:           r.CriuPageServer,
 			LazyPages:                r.LazyMigration,
+			RWLayerDir:               r.RWLayerDir,
 			StatusFile:               statusFileWrite,
 		}
 		if statusFileWrite != nil {
 			// Run checkpoint asynch so we can return once the statusFile gets updated
 			go func() {
-				if err := p.runtime.Checkpoint(ctx, p.id, &opts, actions...); err != nil {
-					dumpLog := filepath.Join(p.Bundle, "criu-dump.log")
-					if cerr := copyFile(dumpLog, filepath.Join(work, "dump.log")); cerr != nil {
-						log.G(ctx).Error(err)
-					}
-					statsDump := filepath.Join(p.Bundle, "stats-dump")
-					if cerr := copyFile(statsDump, filepath.Join(work, "stats-dump")); cerr != nil {
-						log.G(ctx).Error(err)
-					}
-				}
+				runCheckpoint(ctx, r, p, &actions, &runcOptions, work, true)
 				_, _ = statusFileWrite.Write([]byte{0})
 			}()
 		} else {
-			if err := p.runtime.Checkpoint(ctx, p.id, &opts, actions...); err != nil {
-				dumpLog := filepath.Join(p.Bundle, "criu-dump.log")
-				if cerr := copyFile(dumpLog, filepath.Join(work, "dump.log")); cerr != nil {
-					log.G(ctx).Error(err)
-				}
-				statsDump := filepath.Join(p.Bundle, "stats-dump")
-				if cerr := copyFile(statsDump, filepath.Join(work, "stats-dump")); cerr != nil {
-					log.G(ctx).Error(err)
-				}
-				return fmt.Errorf("%s path= %s", criuError(err), dumpLog)
-			}
+			runCheckpoint(ctx, r, p, &actions, &runcOptions, work, true)
 		}
 	} else {
-		runcOptions := &runc.CheckpointOpts{
+		runcOptions := runc.CheckpointOpts{
 			WorkDir:                  work,
 			AllowOpenTCP:             r.AllowOpenTCP,
 			AllowExternalUnixSockets: r.AllowExternalUnixSockets,
@@ -542,20 +569,10 @@ func (p *Init) checkpoint(ctx context.Context, r *CheckpointConfig) error {
 		for ; (dumpStats == nil || dumpStats.GetPagesWritten() > uint64(64)) && i < MAX_PRE_DUMPS; i++ {
 			runcOptions.ImagePath = filepath.Join(r.Path, string(i+48))
 
-			if err := p.runtime.Checkpoint(ctx, p.id, runcOptions, actionsWithPredump...); err != nil {
-				dumpLog := filepath.Join(p.Bundle, "criu-dump.log")
-				if cerr := copyFile(dumpLog, filepath.Join(work, "dump.log")); cerr != nil {
-					log.G(ctx).Error(err)
-				}
-				statsDump := filepath.Join(p.Bundle, "stats-dump"+string(i+48))
-				if cerr := copyFile(statsDump, filepath.Join(work, "stats-dump")); cerr != nil {
-					log.G(ctx).Error(err)
-				}
-				return fmt.Errorf("%s path= %s", criuError(err), dumpLog)
-			}
+			// NOTE: Do not include rwLayer in iterative dump
+			runCheckpoint(ctx, r, p, &actionsWithPredump, &runcOptions, work, false)
 
 			runcOptions.ParentPath = "../" + string(i+48)
-
 			workDir, _ := os.Open(work)
 			dumpStats, _ = criuGetDumpStats(workDir)
 		}
@@ -563,35 +580,17 @@ func (p *Init) checkpoint(ctx context.Context, r *CheckpointConfig) error {
 		runcOptions.ParentPath = string(i + 48)
 		runcOptions.CriuPageServer = r.CriuPageServer
 		runcOptions.LazyPages = r.LazyMigration
+		runcOptions.RWLayerDir = r.RWLayerDir
 		runcOptions.StatusFile = statusFileWrite
-		//final dump
+		// final dump
 		if statusFileWrite != nil {
 			// Run checkpoint asynch so we can return once the statusFile gets updated
 			go func() {
-				if err := p.runtime.Checkpoint(ctx, p.id, runcOptions, actions...); err != nil {
-					dumpLog := filepath.Join(p.Bundle, "criu-dump.log")
-					if cerr := copyFile(dumpLog, filepath.Join(work, "dump.log")); cerr != nil {
-						log.G(ctx).Error(err)
-					}
-					statsDump := filepath.Join(p.Bundle, "stats-dump")
-					if cerr := copyFile(statsDump, filepath.Join(work, "stats-dump")); cerr != nil {
-						log.G(ctx).Error(err)
-					}
-				}
+				runCheckpoint(ctx, r, p, &actions, &runcOptions, work, true)
 				_, _ = statusFileWrite.Write([]byte{0})
 			}()
 		} else {
-			if err := p.runtime.Checkpoint(ctx, p.id, runcOptions, actions...); err != nil {
-				dumpLog := filepath.Join(p.Bundle, "criu-dump.log")
-				if cerr := copyFile(dumpLog, filepath.Join(work, "dump.log")); cerr != nil {
-					log.G(ctx).Error(err)
-				}
-				statsDump := filepath.Join(p.Bundle, "stats-dump")
-				if cerr := copyFile(statsDump, filepath.Join(work, "stats-dump")); cerr != nil {
-					log.G(ctx).Error(err)
-				}
-				return fmt.Errorf("%s path= %s", criuError(err), dumpLog)
-			}
+			runCheckpoint(ctx, r, p, &actions, &runcOptions, work, true)
 		}
 	}
 	if statusFileRead != nil {

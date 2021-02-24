@@ -20,10 +20,13 @@ package process
 
 import (
 	"context"
+	"fmt"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 
+	"github.com/containerd/containerd/log"
 	runc "github.com/containerd/go-runc"
 	google_protobuf "github.com/gogo/protobuf/types"
 	"github.com/pkg/errors"
@@ -178,6 +181,27 @@ func (s *createdCheckpointState) Start(ctx context.Context) error {
 	if cerr := copyFile(statsRestore, filepath.Join(s.opts.WorkDir, "stats-restore")); cerr != nil {
 		return cerr
 	}
+	// Restore rwLayerDir from bundle to the specified place (e.g. `diff/` for overlay2)
+	if s.opts.RWLayerDir != "" {
+		archiveOrigin := filepath.Join(s.opts.ImagePath, "rwlayer.tar.gz")
+		cmd := exec.Command("tar", []string{"--strip-components", "1", "-xvf", archiveOrigin, "-C", s.opts.RWLayerDir}...)
+
+		if cerr := cmd.Start(); cerr != nil {
+			log.G(ctx).Error(errors.Wrap(cerr, "Failed to start `tar` command"))
+		} else {
+			if cerr := cmd.Wait(); cerr != nil {
+				if exiterr, ok := err.(*exec.ExitError); ok {
+					if status, ok := exiterr.Sys().(syscall.WaitStatus); ok {
+						log.G(ctx).Error(errors.Wrap(cerr,
+							fmt.Sprintf("`tar` exited with status %d", status.ExitStatus())))
+					}
+				} else {
+					log.G(ctx).Error(errors.Wrap(cerr, fmt.Sprintf("`tar` cmd.Wait: %v", err)))
+				}
+			}
+		}
+	}
+
 	if sio.Stdin != "" {
 		if err := p.openStdin(sio.Stdin); err != nil {
 			return errors.Wrapf(err, "failed to open stdin fifo %s", sio.Stdin)

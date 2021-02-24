@@ -65,5 +65,6 @@ type CheckpointConfig struct {
 	PreDump                  bool
 	LazyMigration            bool
 	CriuPageServer           string
+	RWLayerDir               string
 	EmptyNamespaces          []string
 }

@@ -478,6 +478,7 @@ func (c *Container) Checkpoint(ctx context.Context, r *task.CheckpointTaskReques
 		PreDump:                  opts.PreDump,
 		LazyMigration:            opts.LazyMigration,
 		CriuPageServer:           opts.CriuPageServer,
+		RWLayerDir:               opts.RwLayerDir,
 		Exit:                     opts.Exit,
 		AllowOpenTCP:             opts.OpenTcp,
 		AllowExternalUnixSockets: opts.ExternalUnixSockets,
