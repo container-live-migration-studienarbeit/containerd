@@ -452,10 +452,10 @@ func (t *task) Checkpoint(ctx context.Context, opts ...CheckpointTaskOpts) (Imag
 		request.Options = any
 	}
 	// make sure we pause it and resume after all other filesystem operations are completed
-	if err := t.Pause(ctx); err != nil {
-		return nil, err
-	}
-	defer t.Resume(ctx)
+	// if err := t.Pause(ctx); err != nil {
+	// 	return nil, err
+	// }
+	// defer t.Resume(ctx)
 	index := v1.Index{
 		Versioned: is.Versioned{
 			SchemaVersion: 2,
